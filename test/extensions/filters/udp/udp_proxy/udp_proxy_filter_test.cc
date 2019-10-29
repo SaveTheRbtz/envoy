@@ -12,6 +12,7 @@ using testing::AtLeast;
 using testing::ByMove;
 using testing::InSequence;
 using testing::Return;
+using testing::ReturnNew;
 using testing::SaveArg;
 
 namespace Envoy {
@@ -108,15 +109,25 @@ public:
     EXPECT_CALL(callbacks_, udpListener()).Times(AtLeast(0));
     EXPECT_CALL(*cluster_manager_.thread_local_cluster_.lb_.host_, address())
         .WillRepeatedly(Return(upstream_address_));
+    EXPECT_CALL(*cluster_manager_.thread_local_cluster_.lb_.host_, health())
+        .WillRepeatedly(Return(Upstream::Host::Health::Healthy));
   }
 
   ~UdpProxyFilterTest() { EXPECT_CALL(callbacks_.udp_listener_, onDestroy()); }
 
-  void setup(const std::string& yaml) {
+  void setup(const std::string& yaml, bool has_cluster = true) {
     envoy::config::filter::udp::udp_proxy::v2alpha::UdpProxyConfig config;
     TestUtility::loadFromYamlAndValidate(yaml, config);
     config_ = std::make_shared<UdpProxyFilterConfig>(cluster_manager_, time_system_, stats_store_,
                                                      config);
+    EXPECT_CALL(cluster_manager_, addThreadLocalClusterUpdateCallbacks_(_))
+        .WillOnce(DoAll(SaveArgAddress(&cluster_update_callbacks_),
+                        ReturnNew<Upstream::MockClusterUpdateCallbacksHandle>()));
+    if (has_cluster) {
+      EXPECT_CALL(cluster_manager_, get(_));
+    } else {
+      EXPECT_CALL(cluster_manager_, get(_)).WillOnce(Return(nullptr));
+    }
     filter_ = std::make_unique<TestUdpProxyFilter>(callbacks_, config_);
   }
 
@@ -130,10 +141,9 @@ public:
     filter_->onData(data);
   }
 
-  void expectSessionCreate() {
-    test_sessions_.emplace_back(*this, upstream_address_);
+  void expectSessionCreate(const Network::Address::InstanceConstSharedPtr& address) {
+    test_sessions_.emplace_back(*this, address);
     TestSession& new_session = test_sessions_.back();
-    EXPECT_CALL(cluster_manager_, get(_));
     new_session.idle_timer_ = new Event::MockTimer(&callbacks_.udp_listener_.dispatcher_);
     EXPECT_CALL(*filter_, createIoHandle(_))
         .WillOnce(Return(ByMove(Network::IoHandlePtr{test_sessions_.back().io_handle_})));
@@ -156,9 +166,9 @@ public:
   Stats::IsolatedStoreImpl stats_store_;
   UdpProxyFilterConfigSharedPtr config_;
   Network::MockUdpReadFilterCallbacks callbacks_;
+  Upstream::ClusterUpdateCallbacks* cluster_update_callbacks_{};
   std::unique_ptr<TestUdpProxyFilter> filter_;
   std::vector<TestSession> test_sessions_;
-  // If a test ever support more than 1 upstream host this will need to move to the session/test.
   const Network::Address::InstanceConstSharedPtr upstream_address_;
 };
 
@@ -171,7 +181,7 @@ stat_prefix: foo
 cluster: fake_cluster
   )EOF");
 
-  expectSessionCreate();
+  expectSessionCreate(upstream_address_);
   test_sessions_[0].expectUpstreamWrite("hello");
   recvDataFromDownstream("10.0.0.1:1000", "10.0.0.2:80", "hello");
   EXPECT_EQ(1, config_->stats().downstream_sess_total_.value());
@@ -202,7 +212,7 @@ stat_prefix: foo
 cluster: fake_cluster
   )EOF");
 
-  expectSessionCreate();
+  expectSessionCreate(upstream_address_);
   test_sessions_[0].expectUpstreamWrite("hello");
   recvDataFromDownstream("10.0.0.1:1000", "10.0.0.2:80", "hello");
   EXPECT_EQ(1, config_->stats().downstream_sess_total_.value());
@@ -212,7 +222,7 @@ cluster: fake_cluster
   EXPECT_EQ(1, config_->stats().downstream_sess_total_.value());
   EXPECT_EQ(0, config_->stats().downstream_sess_active_.value());
 
-  expectSessionCreate();
+  expectSessionCreate(upstream_address_);
   test_sessions_[1].expectUpstreamWrite("hello");
   recvDataFromDownstream("10.0.0.1:1000", "10.0.0.2:80", "hello");
   EXPECT_EQ(2, config_->stats().downstream_sess_total_.value());
@@ -231,7 +241,7 @@ cluster: fake_cluster
   filter_->onReceiveError(Api::IoError::IoErrorCode::UnknownError);
   EXPECT_EQ(1, config_->stats().downstream_sess_rx_errors_.value());
 
-  expectSessionCreate();
+  expectSessionCreate(upstream_address_);
   test_sessions_[0].expectUpstreamWrite("hello");
   recvDataFromDownstream("10.0.0.1:1000", "10.0.0.2:80", "hello");
   checkTransferStats(5 /*rx_bytes*/, 1 /*rx_datagrams*/, 0 /*tx_bytes*/, 0 /*tx_datagrams*/);
@@ -239,6 +249,190 @@ cluster: fake_cluster
   test_sessions_[0].recvDataFromUpstream("world2", EMSGSIZE);
   checkTransferStats(5 /*rx_bytes*/, 1 /*rx_datagrams*/, 0 /*tx_bytes*/, 0 /*tx_datagrams*/);
   EXPECT_EQ(1, config_->stats().downstream_sess_tx_errors_.value());
+}
+
+// No upstream host handling.
+TEST_F(UdpProxyFilterTest, NoUpstreamHost) {
+  InSequence s;
+
+  setup(R"EOF(
+stat_prefix: foo
+cluster: fake_cluster
+  )EOF");
+
+  EXPECT_CALL(cluster_manager_.thread_local_cluster_.lb_, chooseHost(_)).WillOnce(Return(nullptr));
+  recvDataFromDownstream("10.0.0.1:1000", "10.0.0.2:80", "hello");
+  EXPECT_EQ(1, cluster_manager_.thread_local_cluster_.cluster_.info_->stats_
+                   .upstream_cx_none_healthy_.value());
+}
+
+// No cluster at filter creation.
+TEST_F(UdpProxyFilterTest, NoUpstreamClusterAtCreation) {
+  InSequence s;
+
+  setup(R"EOF(
+stat_prefix: foo
+cluster: fake_cluster
+  )EOF",
+        false);
+
+  recvDataFromDownstream("10.0.0.1:1000", "10.0.0.2:80", "hello");
+  EXPECT_EQ(1, config_->stats().downstream_sess_no_route_.value());
+}
+
+// Dynamic cluster addition and removal handling.
+TEST_F(UdpProxyFilterTest, ClusterDynamicAddAndRemoval) {
+  InSequence s;
+
+  setup(R"EOF(
+stat_prefix: foo
+cluster: fake_cluster
+  )EOF",
+        false);
+
+  recvDataFromDownstream("10.0.0.1:1000", "10.0.0.2:80", "hello");
+  EXPECT_EQ(1, config_->stats().downstream_sess_no_route_.value());
+  EXPECT_EQ(0, config_->stats().downstream_sess_total_.value());
+  EXPECT_EQ(0, config_->stats().downstream_sess_active_.value());
+
+  // Add a cluster that we don't care about.
+  NiceMock<Upstream::MockThreadLocalCluster> other_thread_local_cluster;
+  other_thread_local_cluster.cluster_.info_->name_ = "other_cluster";
+  cluster_update_callbacks_->onClusterAddOrUpdate(other_thread_local_cluster);
+  recvDataFromDownstream("10.0.0.1:1000", "10.0.0.2:80", "hello");
+  EXPECT_EQ(2, config_->stats().downstream_sess_no_route_.value());
+  EXPECT_EQ(0, config_->stats().downstream_sess_total_.value());
+  EXPECT_EQ(0, config_->stats().downstream_sess_active_.value());
+
+  // Now add the cluster we care about.
+  cluster_update_callbacks_->onClusterAddOrUpdate(cluster_manager_.thread_local_cluster_);
+  expectSessionCreate(upstream_address_);
+  test_sessions_[0].expectUpstreamWrite("hello");
+  recvDataFromDownstream("10.0.0.1:1000", "10.0.0.2:80", "hello");
+  EXPECT_EQ(1, config_->stats().downstream_sess_total_.value());
+  EXPECT_EQ(1, config_->stats().downstream_sess_active_.value());
+
+  // Remove a cluster we don't care about.
+  cluster_update_callbacks_->onClusterRemoval("other_cluster");
+
+  // Remove the cluster we do care about. This should purge all sessions.
+  cluster_update_callbacks_->onClusterRemoval("fake_cluster");
+  EXPECT_EQ(0, config_->stats().downstream_sess_active_.value());
+}
+
+// Hitting the maximum per-cluster connection/session circuit breaker.
+TEST_F(UdpProxyFilterTest, MaxSessionsCircuitBreaker) {
+  InSequence s;
+
+  setup(R"EOF(
+stat_prefix: foo
+cluster: fake_cluster
+  )EOF");
+
+  // Allow only a single session.
+  cluster_manager_.thread_local_cluster_.cluster_.info_->resetResourceManager(1, 0, 0, 0, 0);
+
+  expectSessionCreate(upstream_address_);
+  test_sessions_[0].expectUpstreamWrite("hello");
+  recvDataFromDownstream("10.0.0.1:1000", "10.0.0.2:80", "hello");
+  EXPECT_EQ(1, config_->stats().downstream_sess_total_.value());
+  EXPECT_EQ(1, config_->stats().downstream_sess_active_.value());
+
+  // This should hit the session circuit breaker.
+  recvDataFromDownstream("10.0.0.2:1000", "10.0.0.2:80", "hello");
+  EXPECT_EQ(
+      1,
+      cluster_manager_.thread_local_cluster_.cluster_.info_->stats_.upstream_cx_overflow_.value());
+  EXPECT_EQ(1, config_->stats().downstream_sess_total_.value());
+  EXPECT_EQ(1, config_->stats().downstream_sess_active_.value());
+
+  // Timing out the 1st session should allow us to create another.
+  test_sessions_[0].idle_timer_->invokeCallback();
+  EXPECT_EQ(1, config_->stats().downstream_sess_total_.value());
+  EXPECT_EQ(0, config_->stats().downstream_sess_active_.value());
+  expectSessionCreate(upstream_address_);
+  test_sessions_[1].expectUpstreamWrite("hello");
+  recvDataFromDownstream("10.0.0.2:1000", "10.0.0.2:80", "hello");
+  EXPECT_EQ(2, config_->stats().downstream_sess_total_.value());
+  EXPECT_EQ(1, config_->stats().downstream_sess_active_.value());
+}
+
+// Verify that all sessions for a host are removed when a host is removed.
+TEST_F(UdpProxyFilterTest, RemoveHostSessions) {
+  InSequence s;
+
+  setup(R"EOF(
+stat_prefix: foo
+cluster: fake_cluster
+  )EOF");
+
+  expectSessionCreate(upstream_address_);
+  test_sessions_[0].expectUpstreamWrite("hello");
+  recvDataFromDownstream("10.0.0.1:1000", "10.0.0.2:80", "hello");
+  EXPECT_EQ(1, config_->stats().downstream_sess_total_.value());
+  EXPECT_EQ(1, config_->stats().downstream_sess_active_.value());
+
+  cluster_manager_.thread_local_cluster_.cluster_.priority_set_.runUpdateCallbacks(
+      0, {}, {cluster_manager_.thread_local_cluster_.lb_.host_});
+  EXPECT_EQ(1, config_->stats().downstream_sess_total_.value());
+  EXPECT_EQ(0, config_->stats().downstream_sess_active_.value());
+
+  expectSessionCreate(upstream_address_);
+  test_sessions_[1].expectUpstreamWrite("hello");
+  recvDataFromDownstream("10.0.0.1:1000", "10.0.0.2:80", "hello");
+  EXPECT_EQ(2, config_->stats().downstream_sess_total_.value());
+  EXPECT_EQ(1, config_->stats().downstream_sess_active_.value());
+}
+
+// In this case the host becomes unhealthy, but we get the same host back, so just keep using the
+// current session.
+TEST_F(UdpProxyFilterTest, HostUnhealthyPickSameHost) {
+  InSequence s;
+
+  setup(R"EOF(
+stat_prefix: foo
+cluster: fake_cluster
+  )EOF");
+
+  expectSessionCreate(upstream_address_);
+  test_sessions_[0].expectUpstreamWrite("hello");
+  recvDataFromDownstream("10.0.0.1:1000", "10.0.0.2:80", "hello");
+  EXPECT_EQ(1, config_->stats().downstream_sess_total_.value());
+  EXPECT_EQ(1, config_->stats().downstream_sess_active_.value());
+
+  EXPECT_CALL(*cluster_manager_.thread_local_cluster_.lb_.host_, health())
+      .WillRepeatedly(Return(Upstream::Host::Health::Unhealthy));
+  test_sessions_[0].expectUpstreamWrite("hello");
+  recvDataFromDownstream("10.0.0.1:1000", "10.0.0.2:80", "hello");
+}
+
+// fixfix
+TEST_F(UdpProxyFilterTest, HostUnhealthyPickDifferentHost) {
+  InSequence s;
+
+  setup(R"EOF(
+stat_prefix: foo
+cluster: fake_cluster
+  )EOF");
+
+  expectSessionCreate(upstream_address_);
+  test_sessions_[0].expectUpstreamWrite("hello");
+  recvDataFromDownstream("10.0.0.1:1000", "10.0.0.2:80", "hello");
+  EXPECT_EQ(1, config_->stats().downstream_sess_total_.value());
+  EXPECT_EQ(1, config_->stats().downstream_sess_active_.value());
+
+  EXPECT_CALL(*cluster_manager_.thread_local_cluster_.lb_.host_, health())
+      .WillRepeatedly(Return(Upstream::Host::Health::Unhealthy));
+  auto new_host = std::make_shared<NiceMock<Upstream::MockHost>>();
+  auto new_host_address = Network::Utility::parseInternetAddressAndPort("20.0.0.2:443");
+  ON_CALL(*new_host, address()).WillByDefault(Return(new_host_address));
+  ON_CALL(*new_host, health()).WillByDefault(Return(Upstream::Host::Health::Healthy));
+  EXPECT_CALL(cluster_manager_.thread_local_cluster_.lb_, chooseHost(_)).WillOnce(Return(new_host));
+  expectSessionCreate(new_host_address);
+  test_sessions_[1].expectUpstreamWrite("hello");
+  recvDataFromDownstream("10.0.0.1:1000", "10.0.0.2:80", "hello");
+  EXPECT_EQ(2, config_->stats().downstream_sess_total_.value());
+  EXPECT_EQ(1, config_->stats().downstream_sess_active_.value());
 }
 
 } // namespace

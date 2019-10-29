@@ -19,6 +19,7 @@ namespace UdpProxy {
  * All UDP proxy stats. @see stats_macros.h
  */
 #define ALL_UDP_PROXY_STATS(COUNTER, GAUGE)                                                        \
+  COUNTER(downstream_sess_no_route)                                                                \
   COUNTER(downstream_sess_rx_bytes)                                                                \
   COUNTER(downstream_sess_rx_datagrams)                                                            \
   COUNTER(downstream_sess_rx_errors)                                                               \
@@ -45,7 +46,8 @@ public:
         session_timeout_(PROTOBUF_GET_MS_OR_DEFAULT(config, idle_timeout, 60 * 1000)),
         stats_(generateStats(config.stat_prefix(), root_scope)) {}
 
-  Upstream::ThreadLocalCluster* getCluster() const { return cluster_manager_.get(cluster_); }
+  const std::string& cluster() const { return cluster_; }
+  Upstream::ClusterManager& clusterManager() const { return cluster_manager_; }
   std::chrono::milliseconds sessionTimeout() const { return session_timeout_; }
   UdpProxyStats& stats() const { return stats_; }
   TimeSource& timeSource() const { return time_source_; }
@@ -66,17 +68,20 @@ private:
 
 using UdpProxyFilterConfigSharedPtr = std::shared_ptr<const UdpProxyFilterConfig>;
 
-class UdpProxyFilter : public Network::UdpListenerReadFilter, Logger::Loggable<Logger::Id::filter> {
+class UdpProxyFilter : public Network::UdpListenerReadFilter,
+                       public Upstream::ClusterUpdateCallbacks,
+                       Logger::Loggable<Logger::Id::filter> {
 public:
   UdpProxyFilter(Network::UdpReadFilterCallbacks& callbacks,
-                 const UdpProxyFilterConfigSharedPtr& config)
-      : UdpListenerReadFilter(callbacks), config_(config) {}
+                 const UdpProxyFilterConfigSharedPtr& config);
 
   // Network::UdpListenerReadFilter
   void onData(Network::UdpRecvData& data) override;
   void onReceiveError(Api::IoError::IoErrorCode error_code) override;
 
 private:
+  class ClusterInfo;
+
   /**
    * An active session is similar to a TCP connection. It binds a 4-tuple (downstream IP/port, local
    * IP/port) to a selected upstream host for the purpose of packet forwarding. Unlike a TCP
@@ -87,10 +92,11 @@ private:
    */
   class ActiveSession : public Network::UdpPacketProcessor {
   public:
-    ActiveSession(UdpProxyFilter& parent, Network::UdpRecvData::LocalPeerAddresses&& addresses,
+    ActiveSession(ClusterInfo& parent, Network::UdpRecvData::LocalPeerAddresses&& addresses,
                   const Upstream::HostConstSharedPtr& host);
     ~ActiveSession();
-    const Network::UdpRecvData::LocalPeerAddresses& addresses() { return addresses_; }
+    const Network::UdpRecvData::LocalPeerAddresses& addresses() const { return addresses_; }
+    const Upstream::Host& host() const { return *host_; }
     void write(const Buffer::Instance& buffer);
 
   private:
@@ -108,7 +114,7 @@ private:
       return Network::MAX_UDP_PACKET_SIZE;
     }
 
-    UdpProxyFilter& parent_;
+    ClusterInfo& cluster_;
     const Network::UdpRecvData::LocalPeerAddresses addresses_;
     const Upstream::HostConstSharedPtr host_;
     const Event::TimerPtr idle_timer_;
@@ -137,6 +143,9 @@ private:
     size_t operator()(const ActiveSessionPtr& value) const {
       return absl::Hash<const Network::UdpRecvData::LocalPeerAddresses>()(value->addresses());
     }
+    size_t operator()(const ActiveSession* value) const {
+      return absl::Hash<const Network::UdpRecvData::LocalPeerAddresses>()(value->addresses());
+    }
   };
 
   struct HeterogeneousActiveSessionEqual {
@@ -150,6 +159,34 @@ private:
     bool operator()(const ActiveSessionPtr& lhs, const ActiveSessionPtr& rhs) const {
       return lhs->addresses() == rhs->addresses();
     }
+    bool operator()(const ActiveSessionPtr& lhs, const ActiveSession* rhs) const {
+      return lhs->addresses() == rhs->addresses();
+    }
+  };
+
+  /**
+   * fixfix
+   */
+  class ClusterInfo {
+  public:
+    ClusterInfo(UdpProxyFilter& filter, Upstream::ThreadLocalCluster& cluster);
+    ~ClusterInfo();
+    void onData(Network::UdpRecvData& data);
+    void removeSession(const ActiveSession* session);
+
+    UdpProxyFilter& filter_;
+    Upstream::ThreadLocalCluster& cluster_;
+
+  private:
+    ActiveSession* createSession(Network::UdpRecvData::LocalPeerAddresses&& addresses,
+                                 const Upstream::HostConstSharedPtr& host);
+
+    Common::CallbackHandle* member_update_cb_handle_;
+    absl::flat_hash_set<ActiveSessionPtr, HeterogeneousActiveSessionHash,
+                        HeterogeneousActiveSessionEqual>
+        sessions_;
+    absl::flat_hash_map<const Upstream::Host*, absl::flat_hash_set<const ActiveSession*>>
+        host_to_sessions_;
   };
 
   virtual Network::IoHandlePtr createIoHandle(const Upstream::HostConstSharedPtr& host) {
@@ -157,10 +194,16 @@ private:
     return host->address()->socket(Network::Address::SocketType::Datagram);
   }
 
+  // Upstream::ClusterUpdateCallbacks
+  void onClusterAddOrUpdate(Upstream::ThreadLocalCluster& cluster) override;
+  void onClusterRemoval(const std::string& cluster_name) override;
+
   const UdpProxyFilterConfigSharedPtr config_;
-  absl::flat_hash_set<ActiveSessionPtr, HeterogeneousActiveSessionHash,
-                      HeterogeneousActiveSessionEqual>
-      sessions_;
+  const Upstream::ClusterUpdateCallbacksHandlePtr cluster_update_callbacks_;
+  // Right now we support a single cluster to route to. It is highly likely in the future that
+  // we will support additional routing options either using filter chain matching, weighting,
+  // etc.
+  absl::optional<ClusterInfo> cluster_info_;
 };
 
 } // namespace UdpProxy
