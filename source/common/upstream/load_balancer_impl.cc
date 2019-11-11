@@ -1,7 +1,9 @@
 #include "common/upstream/load_balancer_impl.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -738,27 +740,66 @@ HostConstSharedPtr EdfLoadBalancerBase::chooseHostOnce(LoadBalancerContext* cont
   }
 }
 
+HostConstSharedPtr LeastRequestLoadBalancer::unweightedHostPickP2C(const HostVector& hosts_to_use) {
+  const size_t hosts_sz = hosts_to_use.size();
+  if (hosts_sz == 1) {
+    return hosts_to_use[0];
+  }
+  const uint64_t i = random_.random() % hosts_sz;
+  const uint64_t j = (i + 1 + random_.random() % (hosts_sz - 1)) % hosts_sz;
+  ASSERT(i != j);
+  const auto rqi = hosts_to_use[i]->stats().rq_active_.value();
+  const auto rqj = hosts_to_use[j]->stats().rq_active_.value();
+  return rqi < rqj ? hosts_to_use[i] : hosts_to_use[j];
+}
+
+HostConstSharedPtr LeastRequestLoadBalancer::unweightedHostPickPNC(const HostVector& hosts_to_use) {
+  auto sample_iter = hosts_to_use;
+  const auto sample_size = std::min(size_t(choice_count_), hosts_to_use.size());
+  std::shuffle(sample_iter.begin(), sample_iter.end(), random_);
+
+  ASSERT(sample_iter.begin() + sample_size <= sample_iter.end());
+  const auto picked_host = *std::min_element(sample_iter.begin(), sample_iter.begin() + sample_size,
+                                             [](const auto& hsp1, const auto& hsp2) {
+                                               return hsp1->stats().rq_active_.value() <
+                                                      hsp2->stats().rq_active_.value();
+                                             });
+  return picked_host;
+}
+
+HostConstSharedPtr LeastRequestLoadBalancer::unweightedHostPickPNCApprox(const HostVector& hosts_to_use) {
+  ASSERT(hosts_to_use.size() > 0);
+
+  std::vector<size_t> random_numbers(choice_count_);
+  std::vector<HostSharedPtr> random_hosts(choice_count_);
+  std::uniform_int_distribution<size_t> dist(0, hosts_to_use.size() - 1);
+  
+  std::generate(random_numbers.begin(), random_numbers.end(),
+    [&]() { return dist(random_); });
+  std::transform(random_numbers.begin(), random_numbers.end(), random_hosts.begin(), 
+    [&](const auto& n) { return random_hosts[n]; });
+
+  ASSERT(random_hosts.size() == choice_count_);
+  const auto picked_host = *std::min_element(random_hosts.begin(), random_hosts.end(),
+                                             [](const auto& hsp1, const auto& hsp2) {
+                                               return hsp1->stats().rq_active_.value() <
+                                                      hsp2->stats().rq_active_.value();
+                                             });
+  return picked_host;
+}
+
 HostConstSharedPtr LeastRequestLoadBalancer::unweightedHostPick(const HostVector& hosts_to_use,
                                                                 const HostsSource&) {
-  HostSharedPtr candidate_host = nullptr;
-  for (uint32_t choice_idx = 0; choice_idx < choice_count_; ++choice_idx) {
-    const int rand_idx = random_.random() % hosts_to_use.size();
-    HostSharedPtr sampled_host = hosts_to_use[rand_idx];
-
-    if (candidate_host == nullptr) {
-      // Make a first choice to start the comparisons.
-      candidate_host = sampled_host;
-      continue;
-    }
-
-    const auto candidate_active_rq = candidate_host->stats().rq_active_.value();
-    const auto sampled_active_rq = sampled_host->stats().rq_active_.value();
-    if (sampled_active_rq < candidate_active_rq) {
-      candidate_host = sampled_host;
-    }
+  switch (choice_count_) {
+  case 0:
+    return nullptr;
+  case 1:
+    return hosts_to_use[random_.random() % hosts_to_use.size()];
+  case 2:
+    return unweightedHostPickP2C(hosts_to_use);
+  default:
+    return hosts_to_use.size() < 20 ? unweightedHostPickPNC(hosts_to_use) : unweightedHostPickPNCApprox(hosts_to_use);
   }
-
-  return candidate_host;
 }
 
 HostConstSharedPtr RandomLoadBalancer::chooseHostOnce(LoadBalancerContext* context) {

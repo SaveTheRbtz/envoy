@@ -461,7 +461,15 @@ private:
   }
   HostConstSharedPtr unweightedHostPick(const HostVector& hosts_to_use,
                                         const HostsSource& source) override;
+  // O(1) fast path for N=2
+  HostConstSharedPtr unweightedHostPickP2C(const HostVector& hosts_to_use);
+  // O(m) slowpath, where m is number of hosts to use
+  HostConstSharedPtr unweightedHostPickPNC(const HostVector& hosts_to_use);
+  // O(n) slowpath, where n is number of choices to make
+  HostConstSharedPtr unweightedHostPickPNCApprox(const HostVector& hosts_to_use);
   const uint32_t choice_count_;
+
+  friend class LeastRequestLoadBalancerTest;
 };
 
 /**

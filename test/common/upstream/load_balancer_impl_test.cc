@@ -1316,14 +1316,14 @@ TEST_P(LeastRequestLoadBalancerTest, SingleHost) {
 
   // Host weight is 1.
   {
-    EXPECT_CALL(random_, random()).WillOnce(Return(0)).WillOnce(Return(2)).WillOnce(Return(3));
+    EXPECT_CALL(random_, random()).WillOnce(Return(0));
     stats_.max_host_weight_.set(1UL);
     EXPECT_EQ(hostSet().healthy_hosts_[0], lb_.chooseHost(nullptr));
   }
 
   // Host weight is 100.
   {
-    EXPECT_CALL(random_, random()).WillOnce(Return(0)).WillOnce(Return(2)).WillOnce(Return(3));
+    EXPECT_CALL(random_, random()).WillOnce(Return(0));
     stats_.max_host_weight_.set(100UL);
     EXPECT_EQ(hostSet().healthy_hosts_[0], lb_.chooseHost(nullptr));
   }
@@ -1331,7 +1331,7 @@ TEST_P(LeastRequestLoadBalancerTest, SingleHost) {
   HostVector empty;
   {
     hostSet().runCallbacks(empty, empty);
-    EXPECT_CALL(random_, random()).WillOnce(Return(0)).WillOnce(Return(2)).WillOnce(Return(3));
+    EXPECT_CALL(random_, random()).WillOnce(Return(0));
     EXPECT_EQ(hostSet().healthy_hosts_[0], lb_.chooseHost(nullptr));
   }
 
@@ -1364,6 +1364,64 @@ TEST_P(LeastRequestLoadBalancerTest, Normal) {
   EXPECT_EQ(hostSet().healthy_hosts_[1], lb_.chooseHost(nullptr));
 }
 
+
+// TEST_F(LeastRequestLoadBalancerTest, unweightedHost2) {
+//   HostVector healthy_hosts = {
+//       makeTestHost(info_, "tcp://127.0.0.1:80"),
+//       makeTestHost(info_, "tcp://127.0.0.1:81"),
+//       makeTestHost(info_, "tcp://127.0.0.1:82"),
+//       makeTestHost(info_, "tcp://127.0.0.1:83"),
+//   };
+//   healthy_hosts[0]->stats().rq_active_.set(4);
+//   healthy_hosts[1]->stats().rq_active_.set(3);
+//   healthy_hosts[2]->stats().rq_active_.set(2);
+//   healthy_hosts[3]->stats().rq_active_.set(1);
+
+//   const auto host1 = HostVector(healthy_hosts.begin(), healthy_hosts.begin() + 1);
+//   EXPECT_CALL(random_, random()).Times(2).WillRepeatedly(Return(1));
+//   EXPECT_EQ(healthy_hosts[0], lb_.unweightedHostPickP2C(host1));
+
+//   const auto host2 = HostVector(healthy_hosts.begin(), healthy_hosts.begin() + 2);
+//   EXPECT_CALL(random_, random()).Times(2).WillRepeatedly(Return(1));
+//   EXPECT_EQ(healthy_hosts[1], lb_.unweightedHostPickP2C(host2));
+
+//   EXPECT_CALL(random_, random()).Times(2).WillRepeatedly(Return(1));
+//   EXPECT_EQ(healthy_hosts[3], lb_.unweightedHostPickP2C(healthy_hosts));
+// }
+
+// TEST_P(LeastRequestLoadBalancerTest, unweightedHostN) {
+//   HostVector healthy_hosts = {
+//       makeTestHost(info_, "tcp://127.0.0.1:80"),
+//       makeTestHost(info_, "tcp://127.0.0.1:81"),
+//       makeTestHost(info_, "tcp://127.0.0.1:82"),
+//       makeTestHost(info_, "tcp://127.0.0.1:83"),
+//   };
+//   healthy_hosts[0]->stats().rq_active_.set(4);
+//   healthy_hosts[1]->stats().rq_active_.set(3);
+//   healthy_hosts[2]->stats().rq_active_.set(2);
+//   healthy_hosts[3]->stats().rq_active_.set(1);
+
+//   const auto host1 = HostVector(healthy_hosts.begin(), healthy_hosts.begin() + 1);
+//   EXPECT_CALL(random_, random()).Times(2).WillRepeatedly(Return(1));
+//   EXPECT_EQ(healthy_hosts[0], lb_.unweightedHostPickPNC(host1));
+//   EXPECT_CALL(random_, random()).Times(2).WillRepeatedly(Return(1));
+//   EXPECT_EQ(healthy_hosts[0], lb_.unweightedHostPickPNC(host1));
+
+//   const auto host2 = HostVector(healthy_hosts.begin(), healthy_hosts.begin() + 2);
+//   EXPECT_CALL(random_, random()).Times(2).WillRepeatedly(Return(1));
+//   EXPECT_EQ(healthy_hosts[0], lb_.unweightedHostPickPNC(host2));
+//   EXPECT_CALL(random_, random()).Times(2).WillRepeatedly(Return(0));
+//   EXPECT_EQ(healthy_hosts[1], lb_.unweightedHostPickPNC(host2));
+//   EXPECT_CALL(random_, random()).Times(2).WillRepeatedly(Return(1));
+//   EXPECT_EQ(healthy_hosts[1], lb_.unweightedHostPickPNC(host2));
+//   EXPECT_CALL(random_, random()).Times(2).WillRepeatedly(Return(1));
+//   EXPECT_EQ(healthy_hosts[1], lb_.unweightedHostPickPNC(host2));
+
+//   const auto all_hosts = HostVector(healthy_hosts.begin(), healthy_hosts.end());
+//   EXPECT_CALL(random_, random()).Times(2).WillRepeatedly(Return(1));
+//   EXPECT_EQ(healthy_hosts[3], lb_.unweightedHostPickPNC(healthy_hosts));
+// }
+
 TEST_P(LeastRequestLoadBalancerTest, PNC) {
   hostSet().healthy_hosts_ = {
       makeTestHost(info_, "tcp://127.0.0.1:80"), makeTestHost(info_, "tcp://127.0.0.1:81"),
@@ -1379,36 +1437,39 @@ TEST_P(LeastRequestLoadBalancerTest, PNC) {
 
   // Creating various load balancer objects with different choice configs.
   envoy::api::v2::Cluster::LeastRequestLbConfig lr_lb_config;
+  lr_lb_config.mutable_choice_count()->set_value(1);
+  LeastRequestLoadBalancer lb_1{priority_set_, nullptr,        stats_,      runtime_,
+                                random_,       common_config_, lr_lb_config};
   lr_lb_config.mutable_choice_count()->set_value(2);
   LeastRequestLoadBalancer lb_2{priority_set_, nullptr,        stats_,      runtime_,
+                                random_,       common_config_, lr_lb_config};
+  lr_lb_config.mutable_choice_count()->set_value(3);
+  LeastRequestLoadBalancer lb_3{priority_set_, nullptr,        stats_,      runtime_,
                                 random_,       common_config_, lr_lb_config};
   lr_lb_config.mutable_choice_count()->set_value(5);
   LeastRequestLoadBalancer lb_5{priority_set_, nullptr,        stats_,      runtime_,
                                 random_,       common_config_, lr_lb_config};
 
-  // Verify correct number of choices.
-
   // 0 choices configured should default to P2C.
   EXPECT_CALL(random_, random()).Times(3).WillRepeatedly(Return(0));
-  EXPECT_EQ(hostSet().healthy_hosts_[0], lb_.chooseHost(nullptr));
+  EXPECT_EQ(hostSet().healthy_hosts_[1], lb_.chooseHost(nullptr));
+
+  // 1 choice configured results in a random choice.
+  EXPECT_CALL(random_, random()).Times(2).WillRepeatedly(Return(8));
+  EXPECT_EQ(hostSet().healthy_hosts_[8 % 4], lb_1.chooseHost(nullptr));
 
   // 2 choices configured results in P2C.
-  EXPECT_CALL(random_, random()).Times(3).WillRepeatedly(Return(0));
-  EXPECT_EQ(hostSet().healthy_hosts_[0], lb_2.chooseHost(nullptr));
+  EXPECT_CALL(random_, random()).Times(3).WillRepeatedly(Return(1));
+  EXPECT_EQ(hostSet().healthy_hosts_[3], lb_2.chooseHost(nullptr));
 
-  // 5 choices configured results in P5C.
-  EXPECT_CALL(random_, random()).Times(6).WillRepeatedly(Return(0));
-  EXPECT_EQ(hostSet().healthy_hosts_[0], lb_5.chooseHost(nullptr));
+  // 3 choices configured results in neither of the 2 most loaded hosts being picked.
+  EXPECT_CALL(random_, random()).Times(4).WillRepeatedly(Return(0));
+  const auto picked = lb_3.chooseHost(nullptr);
+  EXPECT_NE(hostSet().healthy_hosts_[0], picked);
+  EXPECT_NE(hostSet().healthy_hosts_[1], picked);
 
-  // Verify correct host chosen in P5C scenario.
-  EXPECT_CALL(random_, random())
-      .Times(6)
-      .WillOnce(Return(0))
-      .WillOnce(Return(3))
-      .WillOnce(Return(0))
-      .WillOnce(Return(3))
-      .WillOnce(Return(2))
-      .WillOnce(Return(1));
+  // 5 choices configured results in the least loaded host being picked.
+  EXPECT_CALL(random_, random()).Times(4).WillRepeatedly(Return(0));
   EXPECT_EQ(hostSet().healthy_hosts_[3], lb_5.chooseHost(nullptr));
 }
 
