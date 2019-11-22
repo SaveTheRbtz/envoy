@@ -37,6 +37,11 @@ def envoy_copts(repository, test = False):
                repository + "//bazel:windows_x86_64": msvc_options,
                "//conditions:default": posix_options,
            }) + select({
+               # Security hardening
+               repository + "//bazel:clang_build": ["-fstack-protector-strong"],
+               repository + "//bazel:gcc_build": ["-fstack-protector-strong", "-fstack-clash-protection"],
+               "//conditions:default": [],
+           }) + select({
                # Bazel adds an implicit -DNDEBUG for opt.
                repository + "//bazel:opt_build": [] if test else ["-ggdb3"],
                repository + "//bazel:fastbuild_build": [],

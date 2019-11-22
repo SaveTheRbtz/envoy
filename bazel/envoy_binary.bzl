@@ -68,6 +68,7 @@ def _envoy_linkopts():
             "-lrt",
             "-ldl",
             "-Wl,--hash-style=gnu",
+            "-Wl,-z,relro,-z,now",
         ],
     }) + select({
         "@envoy//bazel:boringssl_fips": [],

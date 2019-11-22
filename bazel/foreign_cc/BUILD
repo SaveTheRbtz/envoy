@@ -95,7 +95,7 @@ envoy_cmake_external(
         "ZLIB_LIBRARY": "$EXT_BUILD_DEPS/zlib",
         "ZLIB_INCLUDE_DIR": "$EXT_BUILD_DEPS/zlib/include",
         "CMAKE_CXX_COMPILER_FORCED": "on",
-        "CMAKE_C_FLAGS_BAZEL": "-fPIC",
+        "CMAKE_POSITION_INDEPENDENT_CODE": "on",
     },
     defines = ["CURL_STATICLIB"],
     generate_crosstool_file = True,
