@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <random>
 #include <string>
@@ -768,24 +769,20 @@ HostConstSharedPtr LeastRequestLoadBalancer::unweightedHostPickPNC(const HostVec
 }
 
 HostConstSharedPtr LeastRequestLoadBalancer::unweightedHostPickPNCApprox(const HostVector& hosts_to_use) {
-  ASSERT(hosts_to_use.size() > 0);
+  HostSharedPtr candidate_host = nullptr;
+  uint32_t candidate_active_rq = std::numeric_limits<uint32_t>::max();
+  for (uint32_t choice_idx = 0; choice_idx < choice_count_; ++choice_idx) {
+    const auto rand_idx = random_.random() % hosts_to_use.size();
+    const HostSharedPtr sampled_host = hosts_to_use[rand_idx];
+    const auto sampled_active_rq = sampled_host->stats().rq_active_.value();
 
-  std::vector<size_t> random_numbers(choice_count_);
-  std::vector<HostSharedPtr> random_hosts(choice_count_);
-  std::uniform_int_distribution<size_t> dist(0, hosts_to_use.size() - 1);
-  
-  std::generate(random_numbers.begin(), random_numbers.end(),
-    [&]() { return dist(random_); });
-  std::transform(random_numbers.begin(), random_numbers.end(), random_hosts.begin(), 
-    [&](const auto& n) { return random_hosts[n]; });
+    if (candidate_host == nullptr || sampled_active_rq < candidate_active_rq) {
+      candidate_host = sampled_host;
+      candidate_active_rq = sampled_active_rq;
+    }
+  }
 
-  ASSERT(random_hosts.size() == choice_count_);
-  const auto picked_host = *std::min_element(random_hosts.begin(), random_hosts.end(),
-                                             [](const auto& hsp1, const auto& hsp2) {
-                                               return hsp1->stats().rq_active_.value() <
-                                                      hsp2->stats().rq_active_.value();
-                                             });
-  return picked_host;
+  return candidate_host;
 }
 
 HostConstSharedPtr LeastRequestLoadBalancer::unweightedHostPick(const HostVector& hosts_to_use,
@@ -798,7 +795,7 @@ HostConstSharedPtr LeastRequestLoadBalancer::unweightedHostPick(const HostVector
   case 2:
     return unweightedHostPickP2C(hosts_to_use);
   default:
-    return hosts_to_use.size() < 20 ? unweightedHostPickPNC(hosts_to_use) : unweightedHostPickPNCApprox(hosts_to_use);
+    return hosts_to_use.size() <= 100 ? unweightedHostPickPNC(hosts_to_use) : unweightedHostPickPNCApprox(hosts_to_use);
   }
 }
 
