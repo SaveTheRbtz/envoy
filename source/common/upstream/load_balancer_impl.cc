@@ -756,14 +756,20 @@ HostConstSharedPtr LeastRequestLoadBalancer::unweightedHostPickP2C(const HostVec
 }
 
 HostConstSharedPtr LeastRequestLoadBalancer::unweightedHostPickPNCApprox(const HostVector& hosts_to_use) {
-  std::vector<size_t> random_numbers(choice_count_);
-  std::generate(random_numbers.begin(), random_numbers.end(), [&]() { return random_() % hosts_to_use.size(); });
-  const size_t n = *std::min_element(random_numbers.begin(), random_numbers.end(),
-                                             [&](const size_t i, const size_t j) {
-                                               return hosts_to_use[i]->stats().rq_active_.value() <
-                                                      hosts_to_use[j]->stats().rq_active_.value();
-                                             });
-  return hosts_to_use[n];
+  HostSharedPtr candidate_host = nullptr;
+  uint32_t candidate_active_rq = std::numeric_limits<uint32_t>::max();
+  for (uint32_t choice_idx = 0; choice_idx < choice_count_; ++choice_idx) {
+    const auto rand_idx = random_.random() % hosts_to_use.size();
+    const HostSharedPtr sampled_host = hosts_to_use[rand_idx];
+    const auto sampled_active_rq = sampled_host->stats().rq_active_.value();
+
+    if (candidate_host == nullptr || sampled_active_rq < candidate_active_rq) {
+      candidate_host = sampled_host;
+      candidate_active_rq = sampled_active_rq;
+    }
+  }
+
+  return candidate_host;
 }
 
 HostConstSharedPtr LeastRequestLoadBalancer::unweightedHostPick(const HostVector& hosts_to_use,
